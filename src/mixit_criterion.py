@@ -14,20 +14,61 @@ import torch.nn.functional as F
 EPS = 1e-8
 
 
-def cal_loss(source, estimate_source, source_lengths):
+def cal_loss(source, estimate_source, source_lengths, cross_valid=False):
     """
     Args:
         source: [B, C, T], B is batch size
         estimate_source: [B, 2**M, C, T]
         source_lengths: [B]
     """
-    max_snr,  max_snr_idx = cal_si_snr_with_mixit(source,
+    if not cross_valid:
+        min_mse,  min_mse_idx = cal_logmse_with_mixit(source,
                                                   estimate_source,
                                                   source_lengths)
-    loss = 0 - torch.mean(max_snr)
-    return loss, max_snr, estimate_source
+        loss = torch.mean(min_mse)
+    else:
+        max_snr,  max_snr_idx = cal_si_snr_with_mixit(source,
+                                                  estimate_source,
+                                                  source_lengths)  
+        loss = 0 - torch.mean(max_snr)
+    return loss, estimate_source
     #reorder_estimate_source = reorder_source(estimate_source, perms, max_snr_idx)
     #return loss, max_snr, estimate_source, reorder_estimate_source
+    
+def cal_logmse_with_mixit(source, estimate_source, source_lengths, max_snr=30):
+    """Negative log MSE loss, the negated log of SNR denominator.
+    Args:
+        source: [B, C, T], B is batch size
+        estimate_source: [B, 2**M, C, T]
+        source_lengths: [B], each item is between [0, T]
+        max_snr: SNR threshold
+    """
+    B, C, T = source.size()
+    mask = get_mask(source, source_lengths)
+    mask = torch.unsqueeze(mask, dim=1)
+    estimate_source *= mask
+    source = torch.unsqueeze(source, dim=1) # [B, 1, C, T]
+    
+    # Step 1. Zero-mean norm
+    num_samples = source_lengths.view(-1, 1, 1, 1).float()  # [B, 1, 1, 1]
+    mean_target = torch.sum(source, dim=3, keepdim=True) / num_samples
+    mean_estimate = torch.sum(estimate_source, dim=3, keepdim=True) / num_samples
+    zero_mean_target = source - mean_target
+    zero_mean_estimate = estimate_source - mean_estimate
+    # mask padding position along T
+    zero_mean_target *= mask # [B, 1, C, T]
+    zero_mean_estimate *= mask # [B, 2**M, C, T]
+    
+    snrfactor = 10.**(-max_snr / 10.)
+    e_noise = zero_mean_estimate - zero_mean_target # [B, 2**M, C, T]
+    target_pow = torch.sum(zero_mean_target ** 2, dim=3) + EPS # [B, 1, C]
+    bias = snrfactor * target_pow
+    snr_set = bias + torch.sum(e_noise ** 2, dim=3) # [B, 2**M, C]
+    snr_set = 10 * torch.log10(snr_set + EPS)
+    snr_set = torch.mean(snr_set, dim = 2)
+    min_mse_idx = torch.argmin(snr_set, dim=1)  # [B]
+    min_mse, _ = torch.min(snr_set, dim=1, keepdim=True)
+    return min_mse, min_mse_idx
 
 def cal_si_snr_with_mixit(source, estimate_source, source_lengths):
     """Calculate SI-SNR with PIT training.
@@ -45,7 +86,7 @@ def cal_si_snr_with_mixit(source, estimate_source, source_lengths):
     source = torch.unsqueeze(source, dim=1) # [B, 1, C, T]
 
     # Step 1. Zero-mean norm
-    num_samples = source_lengths.view(-1, 1, 1, 1).float()  # [B, 1, 1]
+    num_samples = source_lengths.view(-1, 1, 1, 1).float()  # [B, 1, 1, 1]
     mean_target = torch.sum(source, dim=3, keepdim=True) / num_samples
     mean_estimate = torch.sum(estimate_source, dim=3, keepdim=True) / num_samples
     zero_mean_target = source - mean_target
@@ -65,7 +106,12 @@ def cal_si_snr_with_mixit(source, estimate_source, source_lengths):
     # e_noise = s' - s_target
     e_noise = s_estimate - pair_wise_proj  # [B, 2**M, C, T]
     # SI-SNR = 10 * log_10(||s_target||^2 / ||e_noise||^2)
-    pair_wise_si_snr = torch.sum(pair_wise_proj ** 2, dim=3) / (torch.sum(e_noise ** 2, dim=3) + EPS)
+    # pair_wise_si_snr = torch.sum(pair_wise_proj ** 2, dim=3) / (torch.sum(e_noise ** 2, dim=3) + EPS)
+    # SNR threshold SNR(max) set as 30 dB
+    # SI-SNR = 10 * log_10(||s_target||^2 / (||e_noise||^2 + tau*||s_target||^2))
+    snr_clamp = 30
+    pair_wise_si_snr = torch.sum(pair_wise_proj ** 2, dim=3) / (torch.sum(e_noise ** 2, dim=3) + 
+                        10 ** (- snr_clamp/10) * torch.sum(pair_wise_proj ** 2, dim=3) + EPS)
     pair_wise_si_snr = 10 * torch.log10(pair_wise_si_snr + EPS)  # [B, 2**M, C]
     
     snr_set = torch.mean(pair_wise_si_snr, dim = 2)

@@ -1,1 +1,1 @@
-# MixIT
+Implementation of Mixture Invariant Training

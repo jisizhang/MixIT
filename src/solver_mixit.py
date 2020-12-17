@@ -178,8 +178,7 @@ class Solver(object):
             vis_iters_loss = torch.Tensor(len(data_loader))
 
         for i, (data) in enumerate(data_loader):
-            padded_mixture, mixture_lengths, padded_source, filenames = data
-            #print('mixture size; padder_source size:', padded_mixture.size(), padded_source.size())
+            padded_mixture, mixture_lengths, padded_source = data
             if self.use_cuda:
                 padded_mixture = padded_mixture.cuda()
                 mixture_lengths = mixture_lengths.cuda()
@@ -200,8 +199,7 @@ class Solver(object):
                 A[k,1,:] = vec_one - bin_nums[k,:]
             #estimate_mixture = torch.matmul(A, estimate_source) # [B, 2**M, 2, T]   
             estimate_mixture = torch.einsum('pjk,bkl->bpjl', A, estimate_source) # [B, 2**M, 2, T]
-            loss, max_snr, estimate_mixture, reorder_estimate_mixture = \
-                cal_loss(padded_source, estimate_mixture, mixture_lengths)
+            loss, estimate_mixture = cal_loss(padded_source, estimate_mixture, mixture_lengths, cross_valid)
             
             
             if not cross_valid:
